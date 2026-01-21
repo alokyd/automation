@@ -3,7 +3,7 @@ import time
 import sqlite3
 import winsound
 from datetime import datetime
-
+from datetime import datetime, timezone
 # ===================== CONFIG =====================
 
 BRAVE_PATH = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
@@ -12,17 +12,15 @@ URL = "https://tgdream.pro/#/saasLottery/WinGo?gameCode=WinGo_30S&lottery=WinGo"
 USER_DATA_DIR = "brave_profile"
 BASE_AMOUNT = 20
 SCAN_INTERVAL = 30
-
 DB_FILE = "bot_data.db"
 
 # ===================== ALERT =====================
 
 def alert_loss():
-    tones = [(1800,120),(2200,180)]
     for _ in range(2):
-        for f,d in tones:
-            winsound.Beep(f,d)
-            time.sleep(0.05)
+        winsound.Beep(1800,120)
+        winsound.Beep(2200,180)
+        time.sleep(0.05)
 
 # ===================== DATABASE =====================
 
@@ -52,6 +50,7 @@ CREATE TABLE IF NOT EXISTS bets (
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT,
     win_streak INTEGER,
     loss_streak INTEGER,
@@ -62,6 +61,18 @@ CREATE TABLE IF NOT EXISTS stats (
 
 conn.commit()
 
+# ===================== LOAD LAST STATE =====================
+
+def load_last_stats():
+    cur.execute("""
+        SELECT win_streak, loss_streak, total_wins, total_losses
+        FROM stats
+        ORDER BY id DESC
+        LIMIT 1
+    """)
+    row = cur.fetchone()
+    return row if row else (0, 0, 0, 0)
+
 # ===================== BET FUNCTION =====================
 
 def place_bet(page, target, attempt_index):
@@ -69,16 +80,11 @@ def place_bet(page, target, attempt_index):
 
     if target == "Big":
         page.locator(".Betting__C-foot-b").click()
-        print("🟦 Clicked BIG")
     else:
         page.locator(".Betting__C-foot-s").click()
-        print("🟨 Clicked SMALL")
 
     time.sleep(1)
-
-    amt = page.locator(".m input[type='number']")
-    amt.fill(str(amount))
-
+    page.locator(".m input[type='number']").fill(str(amount))
     time.sleep(1)
     page.locator("button.bet-amount").click()
 
@@ -111,13 +117,9 @@ with sync_playwright() as p:
     attempts_left = 0
     attempt_index = 0
     round_id = None
-
     last_seen = None
 
-    win_streak = 0
-    loss_streak = 0
-    total_wins = 0
-    total_losses = 0
+    win_streak, loss_streak, total_wins, total_losses = load_last_stats()
 
     # ===================== TIME LOCK =====================
 
@@ -127,10 +129,9 @@ with sync_playwright() as p:
         if time.time() < next_tick:
             time.sleep(next_tick - time.time())
         next_tick += SCAN_INTERVAL
+        ts = datetime.now(timezone.utc).isoformat()
         print("⏱", time.strftime("%H:%M:%S"))
-        ts = datetime.utcnow().isoformat()
 
-        # -------- READ RESULT --------
         row = page.locator(".record-body .van-row").first
         num = int(row.locator(".numcenter").inner_text())
         value = "Big" if num >= 5 else "Small"
@@ -148,7 +149,6 @@ with sync_playwright() as p:
         if cooldown_active:
             if value == last_seen:
                 cooldown_active = False
-                history.clear()
                 print("🔓 Cooldown finished")
             else:
                 last_seen = value
@@ -189,16 +189,28 @@ with sync_playwright() as p:
                 print("🏆 WIN")
                 pattern_active = False
 
+                cur.execute("""
+                    UPDATE bets
+                    SET outcome='Win'
+                    WHERE round_id=? AND attempt_index=?
+                """, (round_id, attempt_index))
+
                 win_streak += 1
                 loss_streak = 0
                 total_wins += 1
 
                 cur.execute(
-                    "UPDATE bets SET outcome='Win' WHERE round_id=? AND outcome IS NULL",
-                    (round_id,)
+                    "INSERT INTO stats VALUES (NULL,?,?,?,?,?)",
+                    (ts, win_streak, loss_streak, total_wins, total_losses)
                 )
 
             else:
+                cur.execute("""
+                    UPDATE bets
+                    SET outcome='Lose'
+                    WHERE round_id=? AND attempt_index=?
+                """, (round_id, attempt_index))
+
                 attempts_left -= 1
                 attempt_index += 1
                 target_value = value
@@ -212,21 +224,19 @@ with sync_playwright() as p:
                 else:
                     print("❌ LOSE")
                     alert_loss()
+                    
+
+                    win_streak = 0
+                    loss_streak += 1
+                    win_streak = 0
+                    total_losses += 1
+
+                    cur.execute(
+                        "INSERT INTO stats VALUES (NULL,?,?,?,?,?)",
+                        (ts, win_streak, loss_streak, total_wins, total_losses)
+                    )
 
                     pattern_active = False
                     cooldown_active = True
 
-                    win_streak = 0
-                    loss_streak += 1
-                    total_losses += 1
-
-                    cur.execute(
-                        "UPDATE bets SET outcome='Lose' WHERE round_id=? AND outcome IS NULL",
-                        (round_id,)
-                    )
-
-            cur.execute(
-                "INSERT INTO stats VALUES (?,?,?,?,?)",
-                (ts, win_streak, loss_streak, total_wins, total_losses)
-            )
             conn.commit()
