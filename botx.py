@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 # ===================== RUNTIME FLAGS =====================
 RUNNING = False
 GUI_CALLBACK = None
+READ_ONLY_MODE = False
 
 # ===================== CONFIG =====================
 
@@ -25,12 +26,13 @@ WINS_TO_RESET = 8
 
 # ===================== GUI CONTROL =====================
 
-def set_runtime_config(base_amount, max_recovery, wins_reset, gui_callback=None):
-    global BASE_AMOUNT, MAX_RECOVERY_LEVEL, WINS_TO_RESET, GUI_CALLBACK
+def set_runtime_config(base_amount, max_recovery, wins_reset, gui_callback=None, read_only=False):
+    global BASE_AMOUNT, MAX_RECOVERY_LEVEL, WINS_TO_RESET, GUI_CALLBACK, READ_ONLY_MODE
     BASE_AMOUNT = base_amount
     MAX_RECOVERY_LEVEL = max_recovery
     WINS_TO_RESET = wins_reset
     GUI_CALLBACK = gui_callback
+    READ_ONLY_MODE = read_only
 
 def stop_bot():
     global RUNNING
@@ -43,10 +45,21 @@ def gui_update(**data):
 # ===================== ALERT =====================
 
 def alert_loss():
-    for _ in range(2):
+    for _ in range(4):
         winsound.Beep(1800,120)
         winsound.Beep(2200,180)
         time.sleep(0.05)
+
+def alert_detection():
+    for _ in range(2):
+        winsound.Beep(1800,120)
+        winsound.Beep(2200,180)
+        time.sleep(0.01)
+
+# def alert_win():
+#     for _ in range(3):
+#         winsound.Beep(1800,120)
+#         winsound.Beep(2200,180)
 
 # ===================== DATABASE =====================
 
@@ -102,6 +115,11 @@ def load_last_stats():
 # ===================== BET FUNCTION =====================
 
 def place_bet(page, target, attempt_index, current_base_amount):
+    if READ_ONLY_MODE:
+        print("🧪 READ-ONLY MODE → Bet skipped")
+        gui_update(status="READ ONLY (NO TRADE)")
+        return 0
+
     amount = current_base_amount * (2 ** attempt_index)
 
     if target == "Big":
@@ -205,7 +223,7 @@ def run_bot():
                 ["Big","Small","Big","Small"],
                 ["Small","Big","Small","Big"]
             ):
-                alert_loss()
+                alert_detection()
                 pattern_active = True
                 target_value = history[-1]
                 attempts_left = 4
@@ -231,7 +249,6 @@ def run_bot():
             if pattern_active:
                 if value == target_value:
                     print("🏆 WIN")
-
                     cur.execute("""
                         UPDATE bets SET outcome='Win'
                         WHERE round_id=? AND attempt_index=?
@@ -270,6 +287,7 @@ def run_bot():
                     else:
                         print("❌ FINAL LOSE")
 
+                        alert_loss()
                         gui_update(status="LOSE")
 
                         history.clear()

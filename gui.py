@@ -8,7 +8,7 @@ class BotGUI:
     def __init__(self, root):
         self.root = root
         root.title("⚡ Trading Bot Dashboard")
-        root.geometry("500x620")
+        root.geometry("500x720")
         root.resizable(False, False)
 
         # ===================== THEME =====================
@@ -26,9 +26,12 @@ class BotGUI:
         self.max_recovery = tk.IntVar(value=5)
         self.wins_reset = tk.IntVar(value=8)
 
+        # ✅ TRADE MODE (REPLACES CHECKBOX)
+        self.trade_mode = tk.StringVar(value="LIVE")  # LIVE / READ_ONLY
+
         # ===================== LIVE VALUES =====================
         self.timer = tk.StringVar(value="-")
-        self.current_base_amount = tk.StringVar(value= "₹ {data['current_base_amount']}")
+        self.current_base_amount = tk.StringVar(value=f"₹ {self.base_amount.get()}")
         self.result = tk.StringVar(value="-")
         self.history = tk.StringVar(value="-")
         self.pattern_id = tk.StringVar(value="-")
@@ -55,6 +58,33 @@ class BotGUI:
             ("Max Recovery", self.max_recovery),
             ("Wins To Reset", self.wins_reset),
         ])
+
+        # ===================== TRADE MODE CARD (FIXED UI) =====================
+        mode_card = ttk.Frame(main, style="Card.TFrame")
+        mode_card.pack(fill="x", pady=8)
+
+        ttk.Label(
+            mode_card,
+            text="🧭 Trade Mode",
+            font=("Segoe UI", 12, "bold")
+        ).pack(anchor="w", padx=12, pady=8)
+
+        modes = ttk.Frame(mode_card)
+        modes.pack(anchor="w", padx=12, pady=6)
+
+        ttk.Radiobutton(
+            modes,
+            text="Live Trading",
+            variable=self.trade_mode,
+            value="LIVE"
+        ).pack(side="left", padx=10)
+
+        ttk.Radiobutton(
+            modes,
+            text="Read Only (No Trade)",
+            variable=self.trade_mode,
+            value="READ_ONLY"
+        ).pack(side="left", padx=10)
 
         # ===================== LIVE STATUS CARD =====================
         status_card = ttk.Frame(main, style="Card.TFrame")
@@ -129,11 +159,14 @@ class BotGUI:
     def start_bot(self):
         self.status.set("RUNNING")
 
+        read_only_flag = (self.trade_mode.get() == "READ_ONLY")
+
         botx.set_runtime_config(
             self.base_amount.get(),
             self.max_recovery.get(),
             self.wins_reset.get(),
-            self.update_gui
+            self.update_gui,
+            read_only_flag
         )
 
         threading.Thread(target=botx.run_bot, daemon=True).start()
@@ -157,7 +190,6 @@ class BotGUI:
             self.pattern_id.set(data["pattern_id"])
         if "trade_amount" in data:
             self.trade_amount.set(f"₹ {data['trade_amount']}")
-        
         if "status" in data:
             self.status.set(data["status"])
 
