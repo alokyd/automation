@@ -2,17 +2,22 @@ from playwright.sync_api import sync_playwright
 import time
 import sqlite3
 import winsound
-from datetime import datetime
 from datetime import datetime, timezone
+
 # ===================== CONFIG =====================
 
 BRAVE_PATH = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
 URL = "https://tgdream.pro/#/saasLottery/WinGo?gameCode=WinGo_30S&lottery=WinGo"
 
 USER_DATA_DIR = "brave_profile"
+
 BASE_AMOUNT = 20
 SCAN_INTERVAL = 30
 DB_FILE = "bot_data.db"
+
+# recovery rules
+MAX_RECOVERY_LEVEL = 5
+WINS_TO_RESET = 7
 
 # ===================== ALERT =====================
 
@@ -75,8 +80,8 @@ def load_last_stats():
 
 # ===================== BET FUNCTION =====================
 
-def place_bet(page, target, attempt_index):
-    amount = BASE_AMOUNT * (2 ** attempt_index)
+def place_bet(page, target, attempt_index, current_base_amount):
+    amount = current_base_amount * (2 ** attempt_index)
 
     if target == "Big":
         page.locator(".Betting__C-foot-b").click()
@@ -121,6 +126,11 @@ with sync_playwright() as p:
 
     win_streak, loss_streak, total_wins, total_losses = load_last_stats()
 
+    # 🔁 RECOVERY STATE (runtime only)
+    current_base_amount = BASE_AMOUNT
+    recovery_level = 0
+    wins_since_last_loss = 0
+
     # ===================== TIME LOCK =====================
 
     next_tick = time.time()
@@ -129,6 +139,7 @@ with sync_playwright() as p:
         if time.time() < next_tick:
             time.sleep(next_tick - time.time())
         next_tick += SCAN_INTERVAL
+
         ts = datetime.now(timezone.utc).isoformat()
         print("⏱", time.strftime("%H:%M:%S"))
 
@@ -148,6 +159,7 @@ with sync_playwright() as p:
         # -------- COOLDOWN --------
         if cooldown_active:
             if value == last_seen:
+                history.append(last_seen)
                 cooldown_active = False
                 print("🔓 Cooldown finished")
             else:
@@ -161,12 +173,13 @@ with sync_playwright() as p:
         history[:] = history[-4:]
         print("📚", history)
 
-        # -------- PATTERN DETECT --------
+        # ===================== PATTERN DETECT =====================
         if not pattern_active and history in (
             ["Big","Small","Big","Small"],
             ["Small","Big","Small","Big"]
         ):
             alert_loss()
+
             pattern_active = True
             target_value = history[-1]
             attempts_left = 4
@@ -174,7 +187,7 @@ with sync_playwright() as p:
             round_id = f"R{int(time.time())}"
 
             print(f"🎯 Pattern detected → {round_id}")
-            amount = place_bet(page, target_value, attempt_index)
+            amount = place_bet(page, target_value, attempt_index, current_base_amount)
 
             cur.execute(
                 "INSERT INTO bets VALUES (NULL,?,?,?,?,?,NULL)",
@@ -183,11 +196,10 @@ with sync_playwright() as p:
             conn.commit()
             continue
 
-        # -------- CHASE MODE --------
+        # ===================== CHASE MODE =====================
         if pattern_active:
             if value == target_value:
                 print("🏆 WIN")
-                pattern_active = False
 
                 cur.execute("""
                     UPDATE bets
@@ -199,10 +211,16 @@ with sync_playwright() as p:
                 loss_streak = 0
                 total_wins += 1
 
-                cur.execute(
-                    "INSERT INTO stats VALUES (NULL,?,?,?,?,?)",
-                    (ts, win_streak, loss_streak, total_wins, total_losses)
-                )
+                wins_since_last_loss += 1
+
+                # 🔁 recovery reset
+                if wins_since_last_loss >= WINS_TO_RESET:
+                    recovery_level = 0
+                    current_base_amount = BASE_AMOUNT
+                    wins_since_last_loss = 0
+                    print("🔁 Recovery complete → base reset")
+
+                pattern_active = False
 
             else:
                 cur.execute("""
@@ -216,27 +234,32 @@ with sync_playwright() as p:
                 target_value = value
 
                 if attempts_left > 0:
-                    amount = place_bet(page, target_value, attempt_index)
+                    amount = place_bet(page, target_value, attempt_index, current_base_amount)
                     cur.execute(
                         "INSERT INTO bets VALUES (NULL,?,?,?,?,?,NULL)",
                         (round_id, ts, target_value, amount, attempt_index)
                     )
                 else:
-                    print("❌ LOSE")
+                    print("❌ FINAL LOSE")
                     alert_loss()
-                    
-
+                    history.clear()
                     win_streak = 0
                     loss_streak += 1
-                    win_streak = 0
                     total_losses += 1
+                    wins_since_last_loss = 0
 
-                    cur.execute(
-                        "INSERT INTO stats VALUES (NULL,?,?,?,?,?)",
-                        (ts, win_streak, loss_streak, total_wins, total_losses)
-                    )
+                    if recovery_level < MAX_RECOVERY_LEVEL:
+                        recovery_level += 1
+                        current_base_amount = BASE_AMOUNT * (2 ** recovery_level)
+                        print(f"📈 Recovery level {recovery_level} → Base ₹{current_base_amount}")
+                    else:
+                        print("🛑 Max recovery level reached")
 
                     pattern_active = False
                     cooldown_active = True
 
+            cur.execute(
+                "INSERT INTO stats VALUES (NULL,?,?,?,?,?)",
+                (ts, win_streak, loss_streak, total_wins, total_losses)
+            )
             conn.commit()
