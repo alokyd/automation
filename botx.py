@@ -4,6 +4,10 @@ import sqlite3
 import winsound
 from datetime import datetime, timezone
 
+# ===================== RUNTIME FLAGS =====================
+RUNNING = False
+GUI_CALLBACK = None
+
 # ===================== CONFIG =====================
 
 BRAVE_PATH = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
@@ -17,7 +21,24 @@ DB_FILE = "bot_data.db"
 
 # recovery rules
 MAX_RECOVERY_LEVEL = 5
-WINS_TO_RESET = 7
+WINS_TO_RESET = 8
+
+# ===================== GUI CONTROL =====================
+
+def set_runtime_config(base_amount, max_recovery, wins_reset, gui_callback=None):
+    global BASE_AMOUNT, MAX_RECOVERY_LEVEL, WINS_TO_RESET, GUI_CALLBACK
+    BASE_AMOUNT = base_amount
+    MAX_RECOVERY_LEVEL = max_recovery
+    WINS_TO_RESET = wins_reset
+    GUI_CALLBACK = gui_callback
+
+def stop_bot():
+    global RUNNING
+    RUNNING = False
+
+def gui_update(**data):
+    if GUI_CALLBACK:
+        GUI_CALLBACK(data)
 
 # ===================== ALERT =====================
 
@@ -29,7 +50,7 @@ def alert_loss():
 
 # ===================== DATABASE =====================
 
-conn = sqlite3.connect(DB_FILE)
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 cur = conn.cursor()
 
 cur.execute("""
@@ -94,172 +115,182 @@ def place_bet(page, target, attempt_index, current_base_amount):
     page.locator("button.bet-amount").click()
 
     print(f"✅ Bet placed: {target} ₹{amount}")
+
+    gui_update(trade_amount=amount)
+
     return amount
 
-# ===================== PLAYWRIGHT =====================
+# ===================== MAIN BOT =====================
 
-with sync_playwright() as p:
-    context = p.chromium.launch_persistent_context(
-        USER_DATA_DIR,
-        executable_path=BRAVE_PATH,
-        headless=False
-    )
+def run_bot():
+    global RUNNING
+    RUNNING = True
 
-    page = context.pages[0] if context.pages else context.new_page()
-    if page.url != URL:
-        page.goto(URL)
-
-    page.wait_for_selector(".record-body .van-row", timeout=0)
-    print("🤖 Bot started\n")
-
-    # ===================== STATE =====================
-
-    history = []
-    pattern_active = False
-    cooldown_active = False
-
-    target_value = None
-    attempts_left = 0
-    attempt_index = 0
-    round_id = None
-    last_seen = None
-
-    win_streak, loss_streak, total_wins, total_losses = load_last_stats()
-
-    # 🔁 RECOVERY STATE (runtime only)
-    current_base_amount = BASE_AMOUNT
-    recovery_level = 0
-    wins_since_last_loss = 0
-
-    # ===================== TIME LOCK =====================
-
-    next_tick = time.time()
-
-    while True:
-        if time.time() < next_tick:
-            time.sleep(next_tick - time.time())
-        next_tick += SCAN_INTERVAL
-
-        ts = datetime.now(timezone.utc).isoformat()
-        print("⏱", time.strftime("%H:%M:%S"))
-
-        row = page.locator(".record-body .van-row").first
-        num = int(row.locator(".numcenter").inner_text())
-        value = "Big" if num >= 5 else "Small"
-
-        print(f"📥 {num} → {value}")
-
-        # -------- STORE RESULT --------
-        cur.execute(
-            "INSERT INTO results VALUES (NULL,?,?,?)",
-            (ts, num, value)
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            USER_DATA_DIR,
+            executable_path=BRAVE_PATH,
+            headless=False
         )
-        conn.commit()
 
-        # -------- COOLDOWN --------
-        if cooldown_active:
-            if value == last_seen:
-                history.append(last_seen)
-                cooldown_active = False
-                print("🔓 Cooldown finished")
-            else:
-                last_seen = value
+        page = context.pages[0] if context.pages else context.new_page()
+        if page.url != URL:
+            page.goto(URL)
+
+        page.wait_for_selector(".record-body .van-row", timeout=0)
+        print("🤖 Bot started\n")
+
+        history = []
+        pattern_active = False
+        cooldown_active = False
+
+        target_value = None
+        attempts_left = 0
+        attempt_index = 0
+        round_id = None
+        last_seen = None
+
+        win_streak, loss_streak, total_wins, total_losses = load_last_stats()
+
+        current_base_amount = BASE_AMOUNT
+        recovery_level = 0
+        wins_since_last_loss = 0
+
+        next_tick = time.time()
+
+        while RUNNING:
+            if time.time() < next_tick:
+                time.sleep(next_tick - time.time())
+            next_tick += SCAN_INTERVAL
+
+            ts = datetime.now(timezone.utc).isoformat()
+            timer_text = time.strftime("%H:%M:%S")
+
+            row = page.locator(".record-body .van-row").first
+            num = int(row.locator(".numcenter").inner_text())
+            value = "Big" if num >= 5 else "Small"
+
+            print("⏱", timer_text)
+            print(f"📥 {num} → {value}")
+
+            cur.execute(
+                "INSERT INTO results VALUES (NULL,?,?,?)",
+                (ts, num, value)
+            )
+            conn.commit()
+
+            if cooldown_active:
+                if value == last_seen:
+                    history.append(last_seen)
+                    cooldown_active = False
+                else:
+                    last_seen = value
+                    continue
+
+            last_seen = value
+            history.append(value)
+            history[:] = history[-4:]
+
+            print("📚", history)
+
+            gui_update(
+                timer=timer_text,
+                result=f"{num} → {value}",
+                history=list(history),
+                pattern_id=round_id,
+                status="RUNNING"
+            )
+
+            if not pattern_active and history in (
+                ["Big","Small","Big","Small"],
+                ["Small","Big","Small","Big"]
+            ):
+                alert_loss()
+                pattern_active = True
+                target_value = history[-1]
+                attempts_left = 4
+                attempt_index = 0
+                round_id = f"R{int(time.time())}"
+
+                print(f"🎯 Pattern detected → {round_id}")
+
+                gui_update(
+                    pattern_id=round_id,
+                    status="PATTERN DETECTED"
+                )
+
+                amount = place_bet(page, target_value, attempt_index, current_base_amount)
+
+                cur.execute(
+                    "INSERT INTO bets VALUES (NULL,?,?,?,?,?,NULL)",
+                    (round_id, ts, target_value, amount, attempt_index)
+                )
+                conn.commit()
                 continue
 
-        last_seen = value
+            if pattern_active:
+                if value == target_value:
+                    print("🏆 WIN")
 
-        # -------- HISTORY --------
-        history.append(value)
-        history[:] = history[-4:]
-        print("📚", history)
+                    cur.execute("""
+                        UPDATE bets SET outcome='Win'
+                        WHERE round_id=? AND attempt_index=?
+                    """, (round_id, attempt_index))
 
-        # ===================== PATTERN DETECT =====================
-        if not pattern_active and history in (
-            ["Big","Small","Big","Small"],
-            ["Small","Big","Small","Big"]
-        ):
-            alert_loss()
+                    win_streak += 1
+                    loss_streak = 0
+                    total_wins += 1
+                    wins_since_last_loss += 1
 
-            pattern_active = True
-            target_value = history[-1]
-            attempts_left = 4
-            attempt_index = 0
-            round_id = f"R{int(time.time())}"
+                    gui_update(status="WIN")
 
-            print(f"🎯 Pattern detected → {round_id}")
-            amount = place_bet(page, target_value, attempt_index, current_base_amount)
-
-            cur.execute(
-                "INSERT INTO bets VALUES (NULL,?,?,?,?,?,NULL)",
-                (round_id, ts, target_value, amount, attempt_index)
-            )
-            conn.commit()
-            continue
-
-        # ===================== CHASE MODE =====================
-        if pattern_active:
-            if value == target_value:
-                print("🏆 WIN")
-
-                cur.execute("""
-                    UPDATE bets
-                    SET outcome='Win'
-                    WHERE round_id=? AND attempt_index=?
-                """, (round_id, attempt_index))
-
-                win_streak += 1
-                loss_streak = 0
-                total_wins += 1
-
-                wins_since_last_loss += 1
-
-                # 🔁 recovery reset
-                if wins_since_last_loss >= WINS_TO_RESET:
-                    recovery_level = 0
-                    current_base_amount = BASE_AMOUNT
-                    wins_since_last_loss = 0
-                    print("🔁 Recovery complete → base reset")
-
-                pattern_active = False
-
-            else:
-                cur.execute("""
-                    UPDATE bets
-                    SET outcome='Lose'
-                    WHERE round_id=? AND attempt_index=?
-                """, (round_id, attempt_index))
-
-                attempts_left -= 1
-                attempt_index += 1
-                target_value = value
-
-                if attempts_left > 0:
-                    amount = place_bet(page, target_value, attempt_index, current_base_amount)
-                    cur.execute(
-                        "INSERT INTO bets VALUES (NULL,?,?,?,?,?,NULL)",
-                        (round_id, ts, target_value, amount, attempt_index)
-                    )
-                else:
-                    print("❌ FINAL LOSE")
-                    alert_loss()
-                    history.clear()
-                    win_streak = 0
-                    loss_streak += 1
-                    total_losses += 1
-                    wins_since_last_loss = 0
-
-                    if recovery_level < MAX_RECOVERY_LEVEL:
-                        recovery_level += 1
-                        current_base_amount = BASE_AMOUNT * (2 ** recovery_level)
-                        print(f"📈 Recovery level {recovery_level} → Base ₹{current_base_amount}")
-                    else:
-                        print("🛑 Max recovery level reached")
+                    if wins_since_last_loss >= WINS_TO_RESET:
+                        recovery_level = 0
+                        current_base_amount = BASE_AMOUNT
+                        wins_since_last_loss = 0
 
                     pattern_active = False
-                    cooldown_active = True
 
-            cur.execute(
-                "INSERT INTO stats VALUES (NULL,?,?,?,?,?)",
-                (ts, win_streak, loss_streak, total_wins, total_losses)
-            )
-            conn.commit()
+                else:
+                    cur.execute("""
+                        UPDATE bets SET outcome='Lose'
+                        WHERE round_id=? AND attempt_index=?
+                    """, (round_id, attempt_index))
+
+                    attempts_left -= 1
+                    attempt_index += 1
+                    target_value = value
+
+                    if attempts_left > 0:
+                        amount = place_bet(page, target_value, attempt_index, current_base_amount)
+                        cur.execute(
+                            "INSERT INTO bets VALUES (NULL,?,?,?,?,?,NULL)",
+                            (round_id, ts, target_value, amount, attempt_index)
+                        )
+                    else:
+                        print("❌ FINAL LOSE")
+
+                        gui_update(status="LOSE")
+
+                        history.clear()
+                        win_streak = 0
+                        loss_streak += 1
+                        total_losses += 1
+                        wins_since_last_loss = 0
+
+                        if recovery_level < MAX_RECOVERY_LEVEL:
+                            recovery_level += 1
+                            current_base_amount = BASE_AMOUNT * (2 ** recovery_level)
+                            gui_update(current_base_amount=current_base_amount)
+
+                        pattern_active = False
+                        cooldown_active = True
+
+                cur.execute(
+                    "INSERT INTO stats VALUES (NULL,?,?,?,?,?)",
+                    (ts, win_streak, loss_streak, total_wins, total_losses)
+                )
+                conn.commit()
+
+        print("🛑 Bot stopped")
+        gui_update(status="STOPPED")
