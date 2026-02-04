@@ -3,6 +3,7 @@ import time
 import sqlite3
 import winsound
 from datetime import datetime, timezone
+from telegram_alert import send_alert
 
 # ===================== RUNTIME FLAGS =====================
 RUNNING = False
@@ -12,7 +13,7 @@ READ_ONLY_MODE = False
 # ===================== CONFIG =====================
 
 BRAVE_PATH = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"
-URL = "https://tgdream.pro/#/saasLottery/WinGo?gameCode=WinGo_30S&lottery=WinGo"
+URL = "https://damansuperstar1.com/#/saasLottery/WinGo?gameCode=WinGo_30S&lottery=WinGo"
 
 USER_DATA_DIR = "brave_profile"
 
@@ -45,16 +46,13 @@ def gui_update(**data):
 # ===================== ALERT =====================
 
 def alert_loss():
-    for _ in range(4):
+    for _ in range(3):
         winsound.Beep(1800,120)
         winsound.Beep(2200,180)
-        time.sleep(0.05)
 
 def alert_detection():
     for _ in range(2):
         winsound.Beep(1800,120)
-        winsound.Beep(2200,180)
-        time.sleep(0.01)
 
 # def alert_win():
 #     for _ in range(3):
@@ -143,6 +141,19 @@ def place_bet(page, target, attempt_index, current_base_amount):
 def run_bot():
     global RUNNING
     RUNNING = True
+    # ===================== TIME SYNC =====================
+    def wait_for_next_tick():
+        now = datetime.now()
+        sec = now.second
+
+        if sec < 8:
+            wait = 8 - sec
+        elif sec < 38:
+            wait = 38 - sec
+        else:
+            wait = 60 - sec + 8  # jump to next minute's :08
+
+        time.sleep(wait)
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
@@ -172,20 +183,24 @@ def run_bot():
 
         current_base_amount = BASE_AMOUNT
         recovery_level = 0
+        top_level = 0
         wins_since_last_loss = 0
 
-        next_tick = time.time()
-
         while RUNNING:
-            if time.time() < next_tick:
-                time.sleep(next_tick - time.time())
-            next_tick += SCAN_INTERVAL
+            wait_for_next_tick()
 
             ts = datetime.now(timezone.utc).isoformat()
             timer_text = time.strftime("%H:%M:%S")
 
             row = page.locator(".record-body .van-row").first
-            num = int(row.locator(".numcenter").inner_text())
+            try:
+                num = int(row.locator(".numcenter").inner_text())
+            except Exception as e:
+                print(f"⚠️ Could not read number: → {e}")
+                print("🔄 Reloading page to recover...")
+                page.reload()
+                time.sleep(5)  # wait a bit for page to load
+                continue
             value = "Big" if num >= 5 else "Small"
 
             print("⏱", timer_text)
@@ -257,14 +272,26 @@ def run_bot():
                     win_streak += 1
                     loss_streak = 0
                     total_wins += 1
+                    
                     wins_since_last_loss += 1
 
                     gui_update(status="WIN")
 
-                    if wins_since_last_loss >= WINS_TO_RESET:
-                        recovery_level = 0
-                        current_base_amount = BASE_AMOUNT
+                    if recovery_level == top_level:
+                        wins_needed = WINS_TO_RESET
+                    else:
+                        wins_needed = 3
+
+                    if wins_since_last_loss >= wins_needed:
                         wins_since_last_loss = 0
+
+                        if recovery_level > 0:
+                            recovery_level -= 1
+                            current_base_amount = BASE_AMOUNT * (2 ** recovery_level)
+                            gui_update(current_base_amount=current_base_amount)
+
+                        if recovery_level == 0:
+                            top_level = 0
 
                     pattern_active = False
 
@@ -286,8 +313,11 @@ def run_bot():
                         )
                     else:
                         print("❌ FINAL LOSE")
-
-                        alert_loss()
+                        for _ in range(5):
+                            send_alert("lost Amount", current_base_amount)
+                            time.sleep(0.1)
+                        
+                        send_alert("number of loses", recovery_level)    
                         gui_update(status="LOSE")
 
                         history.clear()
@@ -298,6 +328,7 @@ def run_bot():
 
                         if recovery_level < MAX_RECOVERY_LEVEL:
                             recovery_level += 1
+                            top_level = recovery_level
                             current_base_amount = BASE_AMOUNT * (2 ** recovery_level)
                             gui_update(current_base_amount=current_base_amount)
 
